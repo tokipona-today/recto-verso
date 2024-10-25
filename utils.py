@@ -1,4 +1,5 @@
 # utils.py
+# à ajouter : gestion de la mémoire...
 
 import json
 import logging
