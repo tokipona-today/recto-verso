@@ -1,7 +1,7 @@
 wheel==0.42.0
 setuptools==69.0.3
 python-dev-tools==2023.3.24
-numpy==1.24.3
+numpy
 opencv-python-headless==4.8.0.74
 streamlit==1.29.0
 scikit-image==0.21.0
