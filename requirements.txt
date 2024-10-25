@@ -9,5 +9,3 @@ scipy==1.11.3
 tqdm==4.66.1
 numba==0.58.1
 Pillow==10.0.0
-psutil==5.9.5
-gc-python-utils==0.1.0
