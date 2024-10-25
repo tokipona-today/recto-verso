@@ -574,7 +574,7 @@ def main():
                             - JPEG
                             - TIFF
 
-                            ### Paramètres recommandés
+                            ### Paramètres provisoirement recommandés (projet stradivarius)
                             - Contraste: 2.4
                             - Luminosité: -38
                             - Flou: 1
