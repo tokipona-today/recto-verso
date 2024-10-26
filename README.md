@@ -109,3 +109,4 @@ L'application utilise un système de cache pour optimiser les performances :
 
 - [Streamlit](https://streamlit.io/) pour le framework d'interface
 - [OpenCV](https://opencv.org/) pour le traitement d'image
+- [Claude](https://claude.ai/) qui a produit la grande majorité de ce code
