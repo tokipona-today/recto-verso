@@ -2,17 +2,18 @@
 
 import streamlit as st
 import numpy as np
-import cv2
+import gc
 import os
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
-
+from utils import manage_memory
 from config import Config, ImageProcessingParams
 from image_processing import ImageProcessor
-from utils import (save_parameters, load_parameters, create_overlay_advanced,
-                   resize_image_if_needed, format_timestamp)
+from utils import (save_parameters, format_timestamp, monitor_memory_usage,get_memory_usage,get_memory_threshold_warning,
+                   cleanup_session_state,clear_memory_intensive_operation,optimize_image_loading,cleanup_numpy_cache)
+
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -487,7 +488,7 @@ def cleanup_temp_files():
 
 
 def main():
-    """Point d'entrée principal de l'application"""
+    """Point d'entrée principal de l'application avec optimisation mémoire"""
     try:
         # Initialisation de la page
         setup_streamlit_page()
@@ -499,7 +500,13 @@ def main():
         # Titre principal
         st.title("🔍 Séparation des italiques")
 
-        # Zone de chargement de l'image
+
+        # Afficher les avertissements si nécessaire
+        warning = get_memory_threshold_warning()
+        if warning:
+            st.sidebar.warning(warning)
+
+        # Zone de chargement de l'image avec monitoring mémoire
         col1, col2 = st.columns([2, 1])
         with col1:
             file_path = handle_image_upload()
@@ -508,98 +515,179 @@ def main():
             if file_path:
                 st.success("Image chargée avec succès")
                 if st.button("Réinitialiser", type="primary"):
+                    # Nettoyage complet lors de la réinitialisation
+                    cleanup_session_state(st.session_state)
                     st.session_state.uploaded_image = None
                     st.session_state.temp_image_path = None
                     st.session_state.processor = None
                     st.session_state.current_results = None
+
+                    # Force le nettoyage mémoire
+                    manage_memory(
+                        threshold_percent=60.0,
+                        force_gc=True,
+                        clear_cache=True,
+                        session_state=st.session_state
+                    )
                     st.rerun()
 
         # Création des paramètres et options d'affichage
         params = create_sidebar_parameters()
         display_options = create_display_options()
 
-        # Traitement de l'image
+        # Traitement de l'image avec optimisation mémoire
         if file_path and os.path.exists(file_path):
-            # Affichage de l'image originale
-            img = cv2.imread(file_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            # Vérification de la taille de l'image
-            img = resize_image_if_needed(img, Config.MAX_IMAGE_SIZE)
+            # Chargement optimisé de l'image
+            img = optimize_image_loading(file_path, Config.MAX_IMAGE_SIZE)
+            if img is None:
+                st.error("Erreur lors du chargement de l'image")
+                return
 
             # Affichage des dimensions
             st.sidebar.markdown("---")
             st.sidebar.subheader("Informations image")
             st.sidebar.text(f"Dimensions: {img.shape[1]}x{img.shape[0]}")
 
+            # Libération mémoire après affichage infos
+            del img
+            gc.collect()
+
             # Traitement si les paramètres ont changé
             if st.session_state.previous_params != params:
-                process_image(file_path, params)
+                # Décorateur pour le traitement avec gestion mémoire
+                @clear_memory_intensive_operation
+                def process_with_memory_management(file_path, params):
+                    # Vérification mémoire avant traitement
+                    memory_mb, memory_percent = get_memory_usage()
+                    if memory_percent > 90:
+                        st.warning("Mémoire système faible. Le traitement pourrait être ralenti.")
+
+                    # Traitement de l'image
+                    process_image(file_path, params)
+
+                    # Nettoyage post-traitement
+                    memory_stats = manage_memory(
+                        threshold_percent=75.0,
+                        session_state=st.session_state
+                    )
+                    return memory_stats
+
+                # Exécution du traitement
+                memory_stats = process_with_memory_management(file_path, params)
                 st.session_state.previous_params = params.copy()
 
-            # Affichage des résultats
+                # Log des statistiques mémoire
+                if memory_stats['memory_saved_mb'] > 0:
+                    logger.info(f"Freed {memory_stats['memory_saved_mb']:.2f}MB of memory after processing")
+
+            # Affichage des résultats avec gestion mémoire optimisée
             if st.session_state.current_results is not None:
+                # Filtrer les résultats selon les options d'affichage
+                filtered_results = {
+                    k: v for k, v in st.session_state.current_results.items()
+                    if display_options.get(k, False)
+                }
+
+                # Affichage des résultats
                 display_results(
-                    st.session_state.current_results,
+                    filtered_results,
                     display_options,
                     params
                 )
 
-                # Bouton d'export
+                # Bouton d'export avec gestion mémoire
                 st.sidebar.markdown("---")
                 if st.sidebar.button("Exporter le résultat", type="primary"):
                     try:
                         output_path = Config.get_output_path(file_path)
+
+                        # Vérification mémoire avant export
+                        manage_memory(threshold_percent=80.0, session_state=st.session_state)
+
                         if st.session_state.processor.save_result(
                                 st.session_state.current_results['overlay'],
                                 output_path
                         ):
                             st.sidebar.success(f"Résultat exporté: {output_path}")
+
+                            # Nettoyage après export
+                            cleanup_numpy_cache()
                         else:
                             st.sidebar.error("Erreur lors de l'export")
                     except Exception as e:
                         st.sidebar.error(f"Erreur: {str(e)}")
+                        logger.error(f"Export error: {str(e)}")
 
         else:
-            # Message d'instruction initial (suite)
+            # Message d'instruction initial
             st.markdown("""
-                            ### Instructions
-                            1. Utilisez le bouton ci-dessus pour charger une image
-                            2. Ajustez les paramètres dans la barre latérale
-                            3. Visualisez les résultats en temps réel
-                            4. Exportez l'image traitée quand vous êtes satisfait
+                ### Instructions
+                1. Utilisez le bouton ci-dessus pour charger une image
+                2. Ajustez les paramètres dans la barre latérale
+                3. Visualisez les résultats en temps réel
+                4. Exportez l'image traitée quand vous êtes satisfait
 
-                            ### Formats supportés
-                            - PNG
-                            - JPEG
-                            - TIFF
+                ### Formats supportés
+                - PNG
+                - JPEG
+                - TIFF
 
-                            ### Paramètres provisoirement recommandés (projet stradivarius)
-                            - Contraste: 2.4
-                            - Luminosité: -38
-                            - Flou: 1
-                            - Débruitage: 3
-                            - Seuil gradient: 1.5
-                            - Angles: 74° à 90°
-                            - Seuil angle droite: 37°
-                            - Taille fenêtre: 21
-                            - Poids italique: 0.15 (droite), 0.3 (gauche)
-                            - Taille minimum: 70 pixels
-                        """)
+                ### Paramètres provisoirement recommandés (projet stradivarius)
+                - Contraste: 2.4
+                - Luminosité: -38
+                - Flou: 1
+                - Débruitage: 3
+                - Seuil gradient: 1.5
+                - Angles: 74° à 90°
+                - Seuil angle droite: 37°
+                - Taille fenêtre: 21
+                - Poids italique: 0.15 (droite), 0.3 (gauche)
+                - Taille minimum: 70 pixels
+            """)
 
     except Exception as e:
         logger.error(f"Erreur dans l'application principale: {str(e)}")
         st.error(f"Une erreur est survenue: {str(e)}")
 
+        # Tentative de récupération en cas d'erreur
+        manage_memory(
+            threshold_percent=60.0,
+            force_gc=True,
+            clear_cache=True,
+            session_state=st.session_state
+        )
+
     finally:
-        # Nettoyage des fichiers temporaires
+        # Nettoyage final
         cleanup_temp_files()
 
         # Message de débogage si nécessaire
         if os.environ.get('DEBUG'):
             st.sidebar.markdown("---")
             st.sidebar.subheader("État de la session")
-            st.sidebar.json(st.session_state)
+            # Afficher uniquement les clés non-sensibles
+            safe_state = {
+                k: str(v) if isinstance(v, (np.ndarray, ImageProcessor)) else v
+                for k, v in st.session_state.items()
+            }
+            st.sidebar.json(safe_state)
+
+        # Ajout d'un compteur de monitoring mémoire en bas de la sidebar
+        st.sidebar.markdown("---")
+        memory_mb, memory_percent = get_memory_usage()
+        st.sidebar.progress(min(100, int(memory_percent)))
+        st.sidebar.text(f"Mémoire système: {memory_percent:.1f}%")
+
+        # Bouton de nettoyage manuel de la mémoire
+        if st.sidebar.button("Nettoyer la mémoire"):
+            memory_stats = manage_memory(
+                threshold_percent=0,  # Force le nettoyage
+                force_gc=True,
+                clear_cache=True,
+                session_state=st.session_state
+            )
+            st.sidebar.success(f"Libéré: {memory_stats['memory_saved_mb']:.1f}MB")
+
 
 if __name__ == "__main__":
     main()
